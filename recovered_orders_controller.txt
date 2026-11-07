@@ -1,0 +1,599 @@
+Created At: 2026-08-16T05:49:07+05:30
+Completed At: 2026-08-16T05:49:07+05:30
+File Path: `file:///c:/Users/deves/OneDrive/Desktop/Projects/PharmaDash/backend/src/controllers/orders.controller.ts`
+Total Lines: 591
+Total Bytes: 20867
+Showing lines 1 to 591
+The following code has been modified to include a line number before every line, in the format: <line_number>: <original_line>. Please note that any changes targeting the original code should remove the line number, colon, and leading space.
+1: import type { Request, Response } from "express";
+2: import { Prisma } from "@prisma/client";
+3: import { prisma } from "../db/prisma";
+4: import { AuthError } from "../middleware/auth.middleware";
+5: 
+6: function qs(val: unknown): string | undefined {
+7:   return typeof val === "string" ? val : undefined;
+8: }
+9: 
+10: // ─── Custom Errors ────────────────────────────────────────────────────────────
+11: 
+12: export class InsufficientStockError extends Error {
+13:   constructor(message = "Insufficient stock for one or more items") {
+14:     super(message);
+15:     this.name = "InsufficientStockError";
+16:   }
+17: }
+18: 
+19: export class CheckoutValidationError extends Error {
+20:   constructor(message: string) {
+21:     super(message);
+22:     this.name = "CheckoutValidationError";
+23:   }
+24: }
+25: 
+26: export class OrderNotFoundError extends Error {
+27:   constructor() {
+28:     super("Order not found");
+29:     this.name = "OrderNotFoundError";
+30:   }
+31: }
+32: 
+33: // ─── Types ────────────────────────────────────────────────────────────────────
+34: 
+35: type OrderItemInput = { medicineId: string; quantity: number };
+36: 
+37: const ORDER_ITEM_SELECT = {
+38:   id: true,
+39:   quantity: true,
+40:   unit_price: true,
+41:   medicine: { select: { id: true, name: true, generic_name: true } },
+42: } as const;
+43: 
+44: // ─── Helpers ─────────────────────────────────────────────────────────────────
+45: 
+46: function mergeQuantities(items: OrderItemInput[]): Map<string, number> {
+47:   const merged = new Map<string, number>();
+48:   for (const { medicineId, quantity } of items) {
+49:     if (!medicineId || typeof medicineId !== "string") {
+50:       throw new CheckoutValidationError("Each item must include a medicineId string");
+51:     }
+52:     if (!Number.isInteger(quantity) || quantity < 1) {
+53:       throw new CheckoutValidationError("Each item must have a positive integer quantity");
+54:     }
+55:     merged.set(medicineId, (merged.get(medicineId) ?? 0) + quantity);
+56:   }
+57:   return merged;
+58: }
+59: 
+60: function resolvePharmacyId(
+61:   rows: { pharmacyId: string; medicineId: string; stock_quantity: number }[],
+62:   required: Map<string, number>,
+63: ): string | null {
+64:   const byPharmacy = new Map<string, Map<string, number>>();
+65:   for (const row of rows) {
+66:     let m = byPharmacy.get(row.pharmacyId);
+67:     if (!m) {
+68:       m = new Map();
+69:       byPharmacy.set(row.pharmacyId, m);
+70:     }
+71:     m.set(row.medicineId, row.stock_quantity);
+72:   }
+73:   for (const [pharmacyId, stocks] of byPharmacy) {
+74:     const ok = [...required.entries()].every(([id, qty]) => (stocks.get(id) ?? 0) >= qty);
+75:     if (ok) return pharmacyId;
+76:   }
+77:   return null;
+78: }
+79: 
+80: function formatOrder(order: {
+81:   id: string;
+82:   customerId: string;
+83:   pharmacyId: string;
+84:   status: string;
+85:   total_amount: Prisma.Decimal;
+86:   createdAt: Date;
+87:   // 👉 1. Add the new fields to the Type Definition
+88:   delivery_address?: string | null;
+89:   delivery_lat?: number | null;
+90:   delivery_lng?: number | null;
+91:   orderItems?: {
+92:     id: string;
+93:     quantity: number;
+94:     unit_price: Prisma.Decimal;
+95:     medicine: { id: string; name: string; generic_name: string };
+96:   }[];
+97: }) {
+98:   return {
+99:     id: order.id,
+100:     customerId: order.customerId,
+101:     pharmacyId: order.pharmacyId,
+102:     status: order.status,
+103:     total_amount: order.total_amount.toString(),
+104:     createdAt: order.createdAt,
+105:     
+106:     // 👉 2. Send the new fields to the Frontend
+107:     delivery_address: order.delivery_address,
+108:     delivery_lat: order.delivery_lat,
+109:     delivery_lng: order.delivery_lng,
+110: 
+111:     ...(order.orderItems
+112:       ? {
+113:           orderItems: order.orderItems.map((item) => ({
+114:             id: item.id,
+115:             quantity: item.quantity,
+116:             unit_price: item.unit_price.toString(),
+117:             medicine: item.medicine,
+118:           })),
+119:         }
+120:       : {}),
+121:   };
+122: }
+123: // ─── Controllers ─────────────────────────────────────────────────────────────
+124: 
+125: // POST /api/orders
+126: export async function createOrder(req: Request, res: Response): Promise<void> {
+127:   if (!req.user) throw new AuthError("Unauthenticated");
+128: 
+129:   const { items, promoCode, delivery_address, delivery_lat, delivery_lng, is_emergency } = req.body as {
+130:     items: Array<{ medicineId: string; quantity: number }>;
+131:     promoCode?: string;
+132:     delivery_address?: string;
+133:     delivery_lat?: number;
+134:     delivery_lng?: number;
+135:     is_emergency?: boolean;
+136:   };
+137: 
+138:   if (!Array.isArray(items) || items.length === 0) {
+139:     throw new CheckoutValidationError("items must be a non-empty array");
+140:   }
+141:   
+142:   if (delivery_lat !== undefined && (typeof delivery_lat !== "number" || delivery_lat < -90 || delivery_lat > 90)) {
+143:     throw new CheckoutValidationError("Invalid delivery_lat");
+144:   }
+145:   if (delivery_lng !== undefined && (typeof delivery_lng !== "number" || delivery_lng < -180 || delivery_lng > 180)) {
+146:     throw new CheckoutValidationError("Invalid delivery_lng");
+147:   }
+148: 
+149:   const merged = mergeQuantities(items);
+150:   const medicineIds = [...merged.keys()];
+151:   const customerId = req.user.id;
+152: 
+153:   const order = await prisma.$transaction(
+154:     async (tx) => {
+155:       const customer = await tx.user.findUnique({ where: { id: customerId } });
+156:       if (!customer) throw new CheckoutValidationError("Customer not found");
+157: 
+158:       const validBatches = await tx.batch.findMany({
+159:         where: { 
+160:           inventory: { medicineId: { in: medicineIds } },
+161:           expiryDate: { gt: new Date() },
+162:           quantity: { gt: 0 }
+163:         },
+164:         include: { inventory: { select: { pharmacyId: true, medicineId: true } } },
+165:         orderBy: { expiryDate: "asc" }
+166:       });
+167: 
+168:       const aggregatedStock: { pharmacyId: string; medicineId: string; stock_quantity: number }[] = [];
+169:       const stockMap = new Map<string, number>(); // key: pharmacyId_medicineId
+170:       for (const b of validBatches) {
+171:         const key = `${b.inventory.pharmacyId}_${b.inventory.medicineId}`;
+172:         stockMap.set(key, (stockMap.get(key) ?? 0) + b.quantity);
+173:       }
+174:       for (const [key, qty] of stockMap.entries()) {
+175:         const [pharmacyId, medicineId] = key.split('_');
+176:         aggregatedStock.push({ pharmacyId, medicineId, stock_quantity: qty });
+177:       }
+178: 
+179:       const pharmacyId = resolvePharmacyId(aggregatedStock, merged);
+180:       if (!pharmacyId) throw new InsufficientStockError("No pharmacy can fulfill this order due to insufficient valid batch stock.");
+181: 
+182:       const medicines = await tx.medicine.findMany({
+183:         where: { id: { in: medicineIds } },
+184:         select: { id: true, price: true },
+185:       });
+186:       if (medicines.length !== medicineIds.length) {
+187:         throw new CheckoutValidationError("One or more medicines were not found");
+188:       }
+189: 
+190:       let total = new Prisma.Decimal(0);
+191:       const priceById = new Map(medicines.map((m) => [m.id, m.price]));
+192:       for (const [medicineId, qty] of merged) {
+193:         const price = priceById.get(medicineId);
+194:         if (!price) throw new CheckoutValidationError("One or more medicines were not found");
+195:         total = total.plus(price.mul(qty));
+196:       }
+197: 
+198:       let discountAmount = new Prisma.Decimal(0);
+199:       if (promoCode) {
+200:         const promo = await tx.promoCode.findUnique({ where: { code: promoCode } });
+201:         if (!promo || !promo.active || (promo.expiresAt && promo.expiresAt < new Date()) || (promo.usageLimit && promo.usedCount >= promo.usageLimit)) {
+202:           throw new CheckoutValidationError("Invalid or expired promo code");
+203:         }
+204:         if (promo.minOrderAmount && total.lt(promo.minOrderAmount)) {
+205:           throw new CheckoutValidationError("Order amount does not meet minimum requirement for promo code");
+206:         }
+207:         if (promo.discountType === "PERCENTAGE") {
+208:           discountAmount = total.mul(promo.discountValue).div(100);
+209:           if (promo.maxDiscount && discountAmount.gt(promo.maxDiscount)) {
+210:             discountAmount = new Prisma.Decimal(promo.maxDiscount);
+211:           }
+212:         } else {
+213:           discountAmount = new Prisma.Decimal(promo.discountValue);
+214:         }
+215:         total = total.minus(discountAmount);
+216:         if (total.lt(0)) total = new Prisma.Decimal(0);
+217:         
+218:         await tx.promoCode.update({
+219:           where: { id: promo.id },
+220:           data: { usedCount: { increment: 1 } }
+221:         });
+222:       }
+223: 
+224:       // 1. Create order first so we have orderItem IDs
+225:       const orderRecord = await tx.order.create({
+226:         data: {
+227:           customerId,
+228:           pharmacyId,
+229:           total_amount: total,
+230:           status: "PAYMENT_PENDING",
+231:           is_emergency: !!is_emergency,
+232:           delivery_address,
+233:           delivery_lat,
+234:           delivery_lng,
+235:           orderItems: {
+236:             create: [...merged.entries()].map(([medicineId, quantity]) => ({
+237:               medicineId,
+238:               quantity,
+239:               unit_price: priceById.get(medicineId)!,
+240:             })),
+241:           },
+242:         },
+243:         include: { orderItems: true },
+244:       });
+245: 
+246:       // 2. Perform FEFO Allocation
+247:       const allocationsToCreate: { orderItemId: string, batchId: string, quantity: number }[] = [];
+248:       const transactionsToCreate: { batchId: string, quantityDelta: number, transactionType: any, referenceId: string, performedById: string }[] = [];
+249:       
+250:       const pharmacyBatches = validBatches.filter(b => b.inventory.pharmacyId === pharmacyId);
+251: 
+252:       for (const orderItem of orderRecord.orderItems) {
+253:         let remainingQty = orderItem.quantity;
+254:         const medicineBatches = pharmacyBatches.filter(b => b.inventory.medicineId === orderItem.medicineId);
+255: 
+256:         for (const batch of medicineBatches) {
+257:           if (remainingQty <= 0) break;
+258:           const consume = Math.min(batch.quantity, remainingQty);
+259:           
+260:           allocationsToCreate.push({ orderItemId: orderItem.id, batchId: batch.id, quantity: consume });
+261:           transactionsToCreate.push({
+262:             batchId: batch.id,
+263:             quantityDelta: -consume,
+264:             transactionType: "ORDER",
+265:             referenceId: orderRecord.id,
+266:             performedById: customerId
+267:           });
+268:           
+269:           remainingQty -= consume;
+270:           batch.quantity -= consume; // Update memory for next iter if needed (though we break if remainingQty 0)
+271:         }
+272: 
+273:         if (remainingQty > 0) {
+274:            throw new InsufficientStockError(`Failed to allocate batch stock for medicine ${orderItem.medicineId}. Concurrent modification might have occurred.`);
+275:         }
+276:       }
+277: 
+278:       // 3. Atomically deduct batches and create records
+279:       for (const alloc of allocationsToCreate) {
+280:         const updateResult = await tx.batch.updateMany({
+281:           where: { id: alloc.batchId, quantity: { gte: alloc.quantity } },
+282:           data: { quantity: { decrement: alloc.quantity } }
+283:         });
+284:         if (updateResult.count === 0) {
+285:           throw new InsufficientStockError("Concurrent checkout depleted a required batch. Please try again.");
+286:         }
+287:       }
+288: 
+289:       await tx.orderItemBatchAllocation.createMany({ data: allocationsToCreate });
+290:       await tx.inventoryTransaction.createMany({ data: transactionsToCreate });
+291: 
+292:       // Return fully formatted order
+293:       const finalOrder = await tx.order.findUnique({
+294:         where: { id: orderRecord.id },
+295:         include: { orderItems: { select: ORDER_ITEM_SELECT } }
+296:       });
+297:       return finalOrder!;
+298:     },
+299:     {
+300:       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+301:       maxWait: 5000,
+302:       timeout: 10000,
+303:     },
+304:   );
+305: 
+306:   res.status(201).json({ order: formatOrder(order) });
+307: }
+308: 
+309: // GET /api/orders
+310: export async function listOrders(req: Request, res: Response): Promise<void> {
+311:   if (!req.user) throw new AuthError("Unauthenticated");
+312: 
+313:   const page  = Math.max(1,   parseInt(qs(req.query.page)  ?? "1",  10));
+314:   const limit = Math.min(100, parseInt(qs(req.query.limit) ?? "20", 10));
+315:   const skip  = (page - 1) * limit;
+316:   const statusFilter = qs(req.query.status) as
+317:     | "PENDING" | "ACCEPTED" | "OUT_FOR_DELIVERY" | "DELIVERED" | "CANCELLED"
+318:     | undefined;
+319: 
+320:   // Admins see all; riders see PENDING or their own; customers see their own
+321:   const canSeeAll = req.user.role === "ADMIN";
+322:   const isRider = req.user.role === "RIDER";
+323:   const where = {
+324:     ...(canSeeAll ? {} : isRider ? {
+325:       OR: [
+326:         { status: "PENDING" as any },
+327:         { riderId: req.user.id }
+328:       ]
+329:     } : { customerId: req.user.id }),
+330:     ...(statusFilter ? { status: statusFilter } : {}),
+331:   };
+332: 
+333:   const [orders, total] = await Promise.all([
+334:     prisma.order.findMany({
+335:       where,
+336:       skip,
+337:       take: limit,
+338:       orderBy: [
+339:         { is_emergency: "desc" },
+340:         { createdAt: "desc" }
+341:       ],
+342:       include: { orderItems: { select: ORDER_ITEM_SELECT } },
+343:     }),
+344:     prisma.order.count({ where }),
+345:   ]);
+346: 
+347:   res.json({
+348:     data: orders.map(formatOrder),
+349:     meta: { total, page, limit, pages: Math.ceil(total / limit) },
+350:   });
+351: }
+352: 
+353: // GET /api/orders/:id
+354: export async function getOrder(req: Request, res: Response): Promise<void> {
+355:   if (!req.user) throw new AuthError("Unauthenticated");
+356: 
+357:   const id = String(req.params.id);
+358:   const order = await prisma.order.findUnique({
+359:     where: { id },
+360:     include: {
+361:       orderItems: { select: ORDER_ITEM_SELECT },
+362:       pharmacy: { select: { id: true, name: true, latitude: true, longitude: true } },
+363:       rider: { select: { id: true, full_name: true, phone_number: true } },
+364:     },
+365:   });
+366: 
+367:   if (!order) throw new OrderNotFoundError();
+368: 
+369:   // Customers can only see their own orders
+370:   if (req.user.role === "CUSTOMER" && order.customerId !== req.user.id) {
+371:     res.status(403).json({ error: "Forbidden" });
+372:     return;
+373:   }
+374: 
+375:   if (req.user.role === "RIDER" && order.riderId !== req.user.id && order.status !== "PENDING") {
+376:     res.status(403).json({ error: "Forbidden" });
+377:     return;
+378:   }
+379: 
+380:   res.json({ order: formatOrder(order) });
+381: }
+382: 
+383: // PATCH /api/orders/:id/status   body: { status }
+384: export async function updateOrderStatus(req: Request, res: Response): Promise<void> {
+385:   if (!req.user) throw new AuthError("Unauthenticated");
+386: 
+387:   const id = String(req.params.id);
+388:   const { status } = req.body as { status?: string };
+389: 
+390:   const validTransitions: Record<string, string[]> = {
+391:     PAYMENT_PENDING: ["PENDING", "CANCELLED"],
+392:     PENDING: ["ACCEPTED", "CANCELLED"],
+393:     ACCEPTED: ["OUT_FOR_DELIVERY", "CANCELLED"],
+394:     OUT_FOR_DELIVERY: ["DELIVERED"],
+395:     DELIVERED: [],
+396:     CANCELLED: [],
+397:   };
+398: 
+399:   const order = await prisma.order.findUnique({ where: { id } });
+400:   if (!order) throw new OrderNotFoundError();
+401: 
+402:   if (!status || !(status in validTransitions)) {
+403:     res.status(400).json({
+404:       error: "Invalid status. Must be one of: PAYMENT_PENDING, PENDING, ACCEPTED, OUT_FOR_DELIVERY, DELIVERED, CANCELLED",
+405:     });
+406:     return;
+407:   }
+408: 
+409:   const allowed = validTransitions[order.status];
+410:   if (!allowed.includes(status)) {
+411:     res.status(409).json({
+412:       error: `Cannot transition from ${order.status} to ${status}. Allowed: ${allowed.join(", ") || "none"}`,
+413:     });
+414:     return;
+415:   }
+416: 
+417:   if (req.user.role === "CUSTOMER") {
+418:     if (order.customerId !== req.user.id) {
+419:       res.status(403).json({ error: "Forbidden" });
+420:       return;
+421:     }
+422:     if (status !== "CANCELLED") {
+423:       res.status(403).json({ error: "Customers can only cancel orders" });
+424:       return;
+425:     }
+426:   }
+427: 
+428:   let extraData: any = {};
+429:   if (status === "ACCEPTED" && req.user.role === "RIDER") {
+430:     const updatedBatch = await prisma.order.updateMany({
+431:       where: { id, status: "PENDING", riderId: null },
+432:       data: { status: "ACCEPTED", riderId: req.user.id }
+433:     });
+434:     if (updatedBatch.count === 0) {
+435:       res.status(409).json({ error: "Order is already claimed by another rider or not pending." });
+436:       return;
+437:     }
+438:     const updated = await prisma.order.findUnique({
+439:       where: { id },
+440:       include: { orderItems: { select: ORDER_ITEM_SELECT } },
+441:     });
+442:     res.json({ order: formatOrder(updated!) });
+443:     return;
+444:   }
+445: 
+446:   if (req.user.role === "RIDER") {
+447:     if (["OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED"].includes(status)) {
+448:       if (order.riderId !== req.user.id) {
+449:          res.status(403).json({ error: "You cannot update an order assigned to someone else." });
+450:          return;
+451:       }
+452:     }
+453:   }
+454: 
+455:   if (status === "CANCELLED") {
+456:     const updatedOrder = await prisma.$transaction(async (tx) => {
+457:       const currentOrder = await tx.order.findUnique({
+458:         where: { id },
+459:         include: { orderItems: { include: { allocations: true } } }
+460:       });
+461:       if (!currentOrder || currentOrder.status === "CANCELLED") {
+462:          return currentOrder; // Idempotent: already cancelled, do nothing
+463:       }
+464:       
+465:       const newOrder = await tx.order.update({
+466:         where: { id },
+467:         data: { status: "CANCELLED" },
+468:         include: { orderItems: { select: ORDER_ITEM_SELECT } },
+469:       });
+470: 
+471:       // Restore inventory
+472:       const transactionsToCreate = [];
+473:       for (const item of currentOrder.orderItems) {
+474:         for (const alloc of item.allocations) {
+475:            await tx.batch.update({
+476:              where: { id: alloc.batchId },
+477:              data: { quantity: { increment: alloc.quantity } }
+478:            });
+479:            transactionsToCreate.push({
+480:              batchId: alloc.batchId,
+481:              quantityDelta: alloc.quantity,
+482:              transactionType: "CANCELLATION",
+483:              referenceId: id,
+484:              performedById: req.user!.id
+485:            });
+486:         }
+487:       }
+488:       
+489:       if (transactionsToCreate.length > 0) {
+490:          // Fix TypeScript issue: We use 'as any' for transactionType because the Prisma Client types might not have re-generated properly in the editor scope yet.
+491:          await tx.inventoryTransaction.createMany({ data: transactionsToCreate as any });
+492:       }
+493:       
+494:       return newOrder;
+495:     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+496: 
+497:     if (!updatedOrder) throw new OrderNotFoundError();
+498:     res.json({ order: formatOrder(updatedOrder as any) });
+499:     return;
+500:   }
+501: 
+502:   const updated = await prisma.order.update({
+503:     where: { id },
+504:     data: { status: status as "PAYMENT_PENDING" | "PENDING" | "ACCEPTED" | "OUT_FOR_DELIVERY" | "DELIVERED" | "CANCELLED", ...extraData },
+505:     include: { orderItems: { select: ORDER_ITEM_SELECT } },
+506:   });
+507: 
+508:   res.json({ order: formatOrder(updated) });
+509: }
+510: 
+511: // POST /api/orders/:id/payment   body: { method: "COD" | "MOCK_UPI" | "MOCK_CARD" }
+512: export async function processPayment(req: Request, res: Response): Promise<void> {
+513:   if (!req.user) throw new AuthError("Unauthenticated");
+514: 
+515:   const id = String(req.params.id);
+516:   const { method } = req.body as { method?: string };
+517: 
+518:   if (!method || !["COD", "MOCK_UPI", "MOCK_CARD"].includes(method)) {
+519:     res.status(400).json({ error: "Invalid payment method" });
+520:     return;
+521:   }
+522: 
+523:   const order = await prisma.order.findUnique({ where: { id } });
+524:   if (!order) throw new OrderNotFoundError();
+525: 
+526:   if (order.customerId !== req.user.id) {
+527:     res.status(403).json({ error: "Forbidden" });
+528:     return;
+529:   }
+530: 
+531:   if (order.status !== "PAYMENT_PENDING") {
+532:     res.status(400).json({ error: "Order is not pending payment" });
+533:     return;
+534:   }
+535: 
+536:   // Simulate payment delay
+537:   if (method !== "COD") {
+538:     await new Promise((resolve) => setTimeout(resolve, 2000));
+539:   }
+540: 
+541:   const updated = await prisma.$transaction(async (tx) => {
+542:     await tx.payment.create({
+543:       data: {
+544:         orderId: order.id,
+545:         amount: order.total_amount,
+546:         method,
+547:         status: "SUCCESS",
+548:         transactionId: method === "COD" ? null : `TXN_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+549:       },
+550:     });
+551: 
+552:     return tx.order.update({
+553:       where: { id: order.id },
+554:       data: { status: "PENDING" },
+555:       include: { orderItems: { select: ORDER_ITEM_SELECT } },
+556:     });
+557:   });
+558: 
+559:   res.json({ order: formatOrder(updated) });
+560: }
+561: 
+562: export async function submitOrderFeedback(req: Request, res: Response): Promise<void> {
+563:   if (!req.user) throw new AuthError("Unauthenticated");
+564:   const id = req.params.id as string;
+565:   const { rating, feedback } = req.body as { rating: number; feedback?: string };
+566: 
+567:   if (typeof rating !== "number" || rating < 1 || rating > 5) {
+568:     res.status(400).json({ error: "Rating must be between 1 and 5" });
+569:     return;
+570:   }
+571: 
+572:   const order = await prisma.order.findUnique({ where: { id } });
+573:   if (!order) throw new OrderNotFoundError();
+574: 
+575:   if (order.customerId !== req.user.id && req.user.role !== "ADMIN") {
+576:     throw new AuthError("Unauthorized to rate this order");
+577:   }
+578: 
+579:   if (order.status !== "DELIVERED") {
+580:     res.status(400).json({ error: "Can only rate delivered orders" });
+581:     return;
+582:   }
+583: 
+584:   const updated = await prisma.order.update({
+585:     where: { id: id as string },
+586:     data: { rating, feedback },
+587:   });
+588: 
+589:   res.json({ success: true, order: formatOrder(updated) });
+590: }
+591: 
+The above content shows the entire, complete file contents of the requested file.

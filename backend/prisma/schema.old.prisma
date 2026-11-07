@@ -1,0 +1,141 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  role          UserRole
+  phone_number  String   @unique
+  full_name     String
+  password_hash String
+  createdAt     DateTime @default(now())
+  orders        Order[]  @relation("OrderCustomer")
+  deliveries    Order[]  @relation("OrderRider")
+
+  @@index([role])
+}
+
+model Pharmacy {
+  id        String      @id @default(cuid())
+  name      String
+  latitude  Float
+  longitude Float
+  inventory Inventory[]
+  orders    Order[]
+
+  @@index([name])
+}
+
+model Medicine {
+  id                    String      @id @default(cuid())
+  name                  String
+  generic_name          String
+  price                 Decimal     @db.Decimal(12, 2)
+  requires_prescription Boolean     @default(false)
+  inventory             Inventory[]
+  orderItems            OrderItem[]
+
+  @@index([name])
+  @@index([generic_name])
+}
+
+/// Inventory rows are the hot path for race conditions during checkout.
+///
+/// **Transaction locking strategy (no negative stock under concurrency):**
+/// - Run stock decrements inside a single database transaction with isolation
+/// `Serializable` or `Repeatable Read`, or explicitly lock the touched rows first.
+/// - For each `(pharmacyId, medicineId)` line item, `SELECT` the inventory row
+/// with `FOR UPDATE` (row-level lock) *before* reading `stock_quantity` and
+/// computing the new value — e.g. via `prisma.$transaction` + `$queryRaw`
+/// `SELECT * FROM "Inventory" WHERE ... FOR UPDATE`, then `UPDATE` only if
+/// `stock_quantity >= qty`. The lock serializes competing checkouts on the same SKU.
+/// - Alternatively use a **single-statement conditional update** (atomic check-and-set):
+/// `UPDATE ... SET stock_quantity = stock_quantity - $qty WHERE id = $id AND stock_quantity >= $qty`
+/// and verify `rowsAffected === 1`; retry or abort the outer transaction on failure.
+/// - Prisma interactive transactions (`prisma.$transaction(async (tx) => { ... })`)
+/// pair naturally with raw `FOR UPDATE` for pessimistic control on high-contention SKUs.
+model Inventory {
+  id             String   @id @default(cuid())
+  pharmacyId     String
+  medicineId     String
+  stock_quantity Int
+  medicine       Medicine @relation(fields: [medicineId], references: [id], onDelete: Cascade)
+  pharmacy       Pharmacy @relation(fields: [pharmacyId], references: [id], onDelete: Cascade)
+
+  @@unique([pharmacyId, medicineId])
+  @@index([pharmacyId])
+  @@index([medicineId])
+}
+
+model Order {
+  id               String      @id @default(cuid())
+  customerId       String
+  pharmacyId       String
+  status           OrderStatus @default(PENDING)
+  total_amount     Decimal     @db.Decimal(12, 2)
+  createdAt        DateTime    @default(now())
+  delivery_address String?
+  delivery_lat     Float?
+  delivery_lng     Float?
+  riderId          String?
+  is_emergency     Boolean     @default(false)
+  feedback         String?
+  rating           Int?
+  customer         User        @relation("OrderCustomer", fields: [customerId], references: [id])
+  pharmacy         Pharmacy    @relation(fields: [pharmacyId], references: [id])
+  rider            User?       @relation("OrderRider", fields: [riderId], references: [id], onDelete: Restrict)
+  orderItems       OrderItem[]
+  payment          Payment?
+
+  @@index([customerId])
+  @@index([pharmacyId])
+  @@index([riderId])
+  @@index([status])
+  @@index([customerId, status])
+}
+
+model OrderItem {
+  id         String   @id @default(cuid())
+  orderId    String
+  medicineId String
+  quantity   Int
+  unit_price Decimal  @db.Decimal(12, 2)
+  medicine   Medicine @relation(fields: [medicineId], references: [id])
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([medicineId])
+}
+
+model Payment {
+  id            String   @id @default(cuid())
+  orderId       String   @unique
+  amount        Decimal  @db.Decimal(12, 2)
+  method        String
+  status        String   @default("PENDING")
+  transactionId String?
+  createdAt     DateTime @default(now())
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+enum UserRole {
+  CUSTOMER
+  RIDER
+  ADMIN
+}
+
+enum OrderStatus {
+  PENDING
+  ACCEPTED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  PAYMENT_PENDING
+}

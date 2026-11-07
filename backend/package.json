@@ -1,0 +1,58 @@
+{
+  "name": "pharmadash-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Enterprise pharmacy delivery API",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch --import tsx src/index.ts",
+    "build": "tsc",
+    "start": "node scripts/start.cjs",
+    "seed": "tsx prisma/seed.ts",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:push": "prisma db push",
+    "db:studio": "prisma studio",
+    "test": "jest --runInBand",
+    "test:integration": "node scripts/test-integration.mjs",
+    "test:smoke": "jest --runInBand --runTestsByPath tests/smoke.test.ts tests/s3_provider.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1111.0",
+    "@aws-sdk/s3-request-presigner": "^3.1111.0",
+    "@google/genai": "^2.17.1",
+    "@prisma/client": "6.19.0",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.2",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.2.0",
+    "razorpay": "^2.9.8",
+    "socket.io": "^4.8.3",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jest": "^30.0.0",
+    "@types/multer": "^2.2.0",
+    "@types/node": "^22.19.19",
+    "@types/socket.io": "^3.0.1",
+    "@types/supertest": "^7.2.1",
+    "embedded-postgres": "^18.4.0-beta.17",
+    "jest": "^30.4.2",
+    "prisma": "^6.19.0",
+    "socket.io-client": "^4.8.3",
+    "supertest": "^7.2.2",
+    "ts-jest": "^29.4.12",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}

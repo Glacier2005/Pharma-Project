@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+src/**/*.js
+prisma/*.js
+*.exe
+desktop.ini
+# Disposable integration database and generated fixtures
+.test-data/

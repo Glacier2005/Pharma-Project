@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: pharmadash-app
+    env: docker
+    plan: free
+    region: singapore # Change as needed
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8080
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pharmadash-db
+          property: connectionString
+      - key: DIRECT_URL
+        fromDatabase:
+          name: pharmadash-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+
+databases:
+  - name: pharmadash-db
+    plan: free
+    region: singapore

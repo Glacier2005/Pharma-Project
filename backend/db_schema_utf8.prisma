@@ -1,0 +1,242 @@
+﻿generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id                      String                 @id @default(cuid())
+  role                    UserRole
+  phone_number            String                 @unique
+  full_name               String
+  password_hash           String
+  createdAt               DateTime               @default(now())
+  pharmacyId              String?
+  inventoryTransactions   InventoryTransaction[]
+  orders                  Order[]                @relation("OrderCustomer")
+  deliveries              Order[]                @relation("OrderRider")
+  customerPrescriptions   Prescription[]         @relation("PrescriptionCustomer")
+  pharmacistPrescriptions Prescription[]         @relation("PrescriptionPharmacist")
+  pharmacy                Pharmacy?              @relation("PharmacyStaff", fields: [pharmacyId], references: [id])
+
+  @@index([role])
+  @@index([pharmacyId])
+}
+
+model Pharmacy {
+  id        String      @id @default(cuid())
+  name      String
+  latitude  Float
+  longitude Float
+  inventory Inventory[]
+  orders    Order[]
+  staff     User[]      @relation("PharmacyStaff")
+
+  @@index([name])
+}
+
+model Medicine {
+  id                    String      @id @default(cuid())
+  name                  String
+  generic_name          String
+  price                 Decimal     @db.Decimal(12, 2)
+  manufacturer          String
+  requires_prescription Boolean     @default(false)
+  stock_quantity        Int         @default(0)
+  inventory             Inventory[]
+  orderItems            OrderItem[]
+}
+
+model Inventory {
+  id         String   @id @default(cuid())
+  pharmacyId String
+  medicineId String
+  batches    Batch[]
+  medicine   Medicine @relation(fields: [medicineId], references: [id], onDelete: Cascade)
+  pharmacy   Pharmacy @relation(fields: [pharmacyId], references: [id], onDelete: Cascade)
+
+  @@unique([pharmacyId, medicineId])
+  @@index([pharmacyId])
+  @@index([medicineId])
+}
+
+model Batch {
+  id           String                     @id @default(cuid())
+  inventoryId  String
+  batchNumber  String
+  expiryDate   DateTime
+  isLegacy     Boolean                    @default(false)
+  quantity     Int                        @default(0)
+  createdAt    DateTime                   @default(now())
+  updatedAt    DateTime                   @updatedAt
+  inventory    Inventory                  @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  transactions InventoryTransaction[]
+  allocations  OrderItemBatchAllocation[]
+
+  @@unique([inventoryId, batchNumber])
+  @@index([inventoryId])
+  @@index([expiryDate])
+}
+
+model Order {
+  id               String         @id @default(cuid())
+  customerId       String
+  pharmacyId       String
+  riderId          String?
+  status           OrderStatus    @default(PENDING)
+  total_amount     Decimal        @db.Decimal(12, 2)
+  delivery_address String?
+  delivery_lat     Float?
+  delivery_lng     Float?
+  createdAt        DateTime       @default(now())
+  rating           Int?
+  feedback         String?
+  customer         User           @relation("OrderCustomer", fields: [customerId], references: [id])
+  pharmacy         Pharmacy       @relation(fields: [pharmacyId], references: [id])
+  rider            User?          @relation("OrderRider", fields: [riderId], references: [id], onDelete: Restrict)
+  orderItems       OrderItem[]
+  payment          Payment?
+  prescriptions    Prescription[]
+
+  @@index([customerId])
+  @@index([pharmacyId])
+  @@index([riderId])
+}
+
+model OrderItem {
+  id          String                     @id @default(cuid())
+  orderId     String
+  medicineId  String
+  quantity    Int
+  unit_price  Decimal                    @db.Decimal(12, 2)
+  medicine    Medicine                   @relation(fields: [medicineId], references: [id])
+  order       Order                      @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  allocations OrderItemBatchAllocation[]
+
+  @@index([orderId])
+  @@index([medicineId])
+}
+
+model OrderItemBatchAllocation {
+  id          String    @id @default(cuid())
+  orderItemId String
+  batchId     String
+  quantity    Int
+  batch       Batch     @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@unique([orderItemId, batchId])
+  @@index([orderItemId])
+  @@index([batchId])
+}
+
+model InventoryTransaction {
+  id              String                   @id @default(cuid())
+  batchId         String
+  quantityDelta   Int
+  transactionType InventoryTransactionType
+  referenceId     String?
+  performedById   String
+  createdAt       DateTime                 @default(now())
+  batch           Batch                    @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  performedBy     User                     @relation(fields: [performedById], references: [id])
+
+  @@index([batchId])
+  @@index([performedById])
+  @@index([referenceId])
+}
+
+model Payment {
+  id            String   @id @default(cuid())
+  orderId       String   @unique
+  amount        Decimal  @db.Decimal(12, 2)
+  method        String
+  status        String   @default("PENDING")
+  transactionId String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
+
+model Session {
+  id        String   @id
+  sid       String   @unique
+  data      String
+  expiresAt DateTime
+}
+
+model PromoCode {
+  id              String    @id @default(cuid())
+  code            String    @unique
+  discountPercent Int
+  active          Boolean   @default(true)
+  expiresAt       DateTime?
+  createdAt       DateTime  @default(now())
+}
+
+model Prescription {
+  id               String             @id @default(cuid())
+  orderId          String
+  customerId       String
+  storageKey       String
+  originalFilename String
+  mimeType         String
+  fileSize         Int
+  status           PrescriptionStatus @default(PENDING)
+  pharmacistId     String?
+  notes            String?
+  ocrText          String?
+  aiSuggestions    Json?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  customer         User               @relation("PrescriptionCustomer", fields: [customerId], references: [id], onDelete: Cascade)
+  order            Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  pharmacist       User?              @relation("PrescriptionPharmacist", fields: [pharmacistId], references: [id])
+
+  @@index([orderId])
+  @@index([customerId])
+  @@index([pharmacistId])
+  @@index([status])
+}
+
+enum UserRole {
+  ADMIN
+  PHARMACY_ADMIN
+  PHARMACIST
+  RIDER
+  CUSTOMER
+}
+
+enum OrderStatus {
+  PRESCRIPTION_PENDING
+  PAYMENT_PENDING
+  PENDING
+  ACCEPTED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+enum InventoryTransactionType {
+  PURCHASE
+  ORDER
+  RETURN
+  CANCELLATION
+  ADJUSTMENT
+  DAMAGED
+  EXPIRED
+}
+
+enum PrescriptionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+
