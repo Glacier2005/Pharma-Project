@@ -43,8 +43,8 @@ PharmaDash is a professional, full-stack pharmacy delivery and management platfo
 
 ### 2. Clone the Repository
 ```bash
-git clone https://github.com/devesh3001/PharmaDash.git
-cd PharmaDash
+git clone https://github.com/Glacier2005/Pharma-Project.git
+cd Pharma-Project
 ```
 
 ### 3. Backend Setup
